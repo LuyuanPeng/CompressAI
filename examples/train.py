@@ -44,6 +44,10 @@ from compressai.losses import RateDistortionLoss
 from compressai.optimizers import net_aux_optimizer
 from compressai.zoo import image_models
 
+import os
+
+# Set the CUDA visible device
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Change "0" to the GPU ID you want to use
 
 class AverageMeter:
     """Compute running average."""
@@ -249,7 +253,7 @@ def main(argv):
     )
 
     train_dataset = ImageFolder(args.dataset, split="train", transform=train_transforms)
-    test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
+    test_dataset = ImageFolder(args.dataset, split="valid", transform=test_transforms)
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
 
@@ -269,7 +273,7 @@ def main(argv):
         pin_memory=(device == "cuda"),
     )
 
-    net = image_models[args.model](quality=3)
+    net = image_models[args.model](quality=1)
     net = net.to(device)
 
     if args.cuda and torch.cuda.device_count() > 1:
@@ -290,6 +294,8 @@ def main(argv):
         lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
     best_loss = float("inf")
+    patience = 10  # Number of epochs to wait for improvement
+    epochs_no_improve = 0
     for epoch in range(last_epoch, args.epochs):
         print(f"Learning rate: {optimizer.param_groups[0]['lr']}")
         train_one_epoch(
@@ -305,7 +311,11 @@ def main(argv):
         lr_scheduler.step(loss)
 
         is_best = loss < best_loss
-        best_loss = min(loss, best_loss)
+        if is_best:
+            best_loss = loss
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
         if args.save:
             save_checkpoint(
@@ -319,6 +329,11 @@ def main(argv):
                 },
                 is_best,
             )
+
+        # Early stopping
+        if epochs_no_improve >= patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+            break
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ import torch.nn.functional as F
 from PIL import Image
 from pytorch_msssim import ms_ssim
 from torchvision import transforms
+import torchvision.utils
 
 import compressai
 
@@ -146,6 +147,7 @@ def inference(model, x, vbr_stage=None, vbr_scale=None):
         "bpp": bpp,
         "encoding_time": enc_time,
         "decoding_time": dec_time,
+        "x_hat": out_dec["x_hat"],
     }
 
 
@@ -175,6 +177,7 @@ def inference_entropy_estimation(model, x, vbr_stage=None, vbr_scale=None):
         "bpp": bpp.item(),
         "encoding_time": elapsed_time / 2.0,  # broad estimation
         "decoding_time": elapsed_time / 2.0,
+        "x_hat": out_net["x_hat"],
     }
 
 
@@ -206,6 +209,25 @@ def load_checkpoint(arch: str, no_update: bool, checkpoint_path: str) -> nn.Modu
     return net.eval()
 
 
+def tensor_to_python(obj):
+    """Recursively convert torch.Tensors and numpy arrays to Python types for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, torch.Tensor):
+        if obj.numel() == 1:
+            return obj.item()
+        return obj.cpu().tolist()
+    elif isinstance(obj, np.ndarray):
+        if obj.size == 1:
+            return obj.item()
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: tensor_to_python(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [tensor_to_python(v) for v in obj]
+    else:
+        return obj
+
+
 def eval_model(
     model: nn.Module,
     outputdir: Path,
@@ -218,9 +240,13 @@ def eval_model(
     vbr_scale=None,
     **args: Any,
 ) -> Dict[str, Any]:
+    import torchvision.utils
     device = next(model.parameters()).device
     metrics = defaultdict(float)
     is_vbr_model = args["architecture"].endswith("-vbr")
+    # Create a subfolder for reconstructed images
+    recon_dir = Path(outputdir) / "recon"
+    recon_dir.mkdir(parents=True, exist_ok=True)
     for filepath in filepaths:
         x = read_image(filepath).to(device)
         if not entropy_estimation:
@@ -232,21 +258,28 @@ def eval_model(
                 if not is_vbr_model
                 else inference(model, x, vbr_stage, vbr_scale)
             )
+            # Save reconstructed image ONLY in recon_dir
+            if "x_hat" in rv:
+                out_img = torch.clamp(rv["x_hat"].squeeze(0).cpu(), 0, 1)
+                out_img_path = recon_dir / f"{Path(filepath).stem}-{trained_net}.png"
+                torchvision.utils.save_image(out_img, out_img_path)
         else:
             rv = (
                 inference_entropy_estimation(model, x)
                 if not is_vbr_model
                 else inference_entropy_estimation(model, x, vbr_stage, vbr_scale)
             )
+            # Save reconstructed image for entropy estimation ONLY in recon_dir
+            if "x_hat" in rv:
+                out_img = torch.clamp(rv["x_hat"].squeeze(0).cpu(), 0, 1)
+                out_img_path = recon_dir / f"{Path(filepath).stem}-{trained_net}.png"
+                torchvision.utils.save_image(out_img, out_img_path)
         for k, v in rv.items():
             metrics[k] += v
         if args["per_image"]:
             if not Path(outputdir).is_dir():
                 raise FileNotFoundError("Please specify output directory")
-
-            output_subdir = Path(outputdir) / Path(filepath).parent.relative_to(
-                inputdir
-            )
+            output_subdir = Path(outputdir) / Path(filepath).parent.relative_to(inputdir)
             output_subdir.mkdir(parents=True, exist_ok=True)
             image_metrics_path = output_subdir / f"{filepath.stem}-{trained_net}.json"
             with image_metrics_path.open("wb") as f:
@@ -254,10 +287,9 @@ def eval_model(
                     "source": filepath.stem,
                     "name": args["architecture"],
                     "description": f"Inference ({description})",
-                    "results": rv,
+                    "results": tensor_to_python(rv),
                 }
                 f.write(json.dumps(output, indent=2).encode())
-
     for k, v in metrics.items():
         metrics[k] = v / len(filepaths)
     return metrics
@@ -494,6 +526,7 @@ def main(argv):  # noqa: C901
         "description": f"Inference ({description})",
         "results": results,
     }
+    output = tensor_to_python(output)
     if args.output_directory:
         output_file = (
             args.output_file

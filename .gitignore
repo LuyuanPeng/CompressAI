@@ -140,3 +140,8 @@ dmypy.json
 
 # PyCharm
 .idea/
+
+
+*.json
+*.pth.tar
+results/
